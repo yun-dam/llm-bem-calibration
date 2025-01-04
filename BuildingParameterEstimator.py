@@ -4,6 +4,9 @@ from langchain_ollama import ChatOllama
 from langchain.output_parsers import ResponseSchema, StructuredOutputParser
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from eppy.modeleditor import IDF
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 class BuildingParameterEstimator:
@@ -217,12 +220,59 @@ class BuildingParameterEstimator:
         print(f"Updated IDF file saved at {updated_idf_path}")
 
     def run_simulation(self, idf_path: str):
-        """Run the simulation using the updated IDF file."""
-        # Load the updated IDF file 
-        
-        epw_path = "./ep-model/USA_MT_Charlie.Stanford.720996_TMYx.2007-2021.epw"
+        """Run the simulation using the updated IDF file and process the generated energy data."""
+        # Load the updated IDF file
+        epw_path = r"./ep-model/USA_MT_Charlie.Stanford.720996_TMYx.2007-2021.epw"
         updated_idf = IDF(idf_path, epw_path)
-        updated_idf.run(output_prefix = '_run', output_suffix = 'L', readvars=True)
+        updated_idf.run(output_prefix='_run', output_suffix='C', readvars=True, output_directory='./ep-model')
+
+        # Path to the generated CSV file
+        csv_file_path = './ep-model/_runMeter.csv'
+
+        try:
+            # Load the generated CSV data
+            df = pd.read_csv(csv_file_path)
+            
+            # Column names
+            electricity_col = 'Electricity:Facility [J](Hourly)'
+            natural_gas_col = 'NaturalGas:Facility [J](Hourly) '
+            
+            # Sum the two columns row-wise and convert Joules to kWh (1 kWh = 3.6e6 J)
+            df['energy'] = (df[electricity_col] + df[natural_gas_col])  / 3.6e6
+            
+            self.summed_kwh = df['energy']
+            
+            # Ensure exactly 24 rows of results
+            if len(self.summed_kwh) == 24:
+                print("Summed energy values in kWh for rows 2 to 25:")
+                print(self.summed_kwh.reset_index(drop=True))  # Display 24 summed rows
+            else:
+                print(f"Unexpected number of rows in the extracted data: {len(self.summed_kwh)}")
+
+        except Exception as e:
+            print(f"An error occurred while processing the CSV file: {e}")
+
+    def plot_energy_data(self):
+        """Plot the energy data in an academic format using Arial font."""
+        plt.figure(figsize=(10, 6))
+        
+        # Create a stepwise plot
+        plt.plot(range(1, 25), self.summed_kwh, label="Total Energy [kWh]", linewidth=2, color='blue', marker='o', markersize=6)
+
+        plt.xlabel("Hour", fontname="Arial", fontsize=18)
+        plt.ylabel("Energy [kWh]", fontname="Arial", fontsize=18)
+
+        # Customize the ticks and grid
+        plt.xticks(range(1, 25), fontname="Arial", fontsize=16)
+        plt.yticks(fontname="Arial", fontsize=16)
+        plt.grid(True, linestyle="--")
+
+        # Ensure integer ticks on the x-axis
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+
+        # Save and display the plot
+        plt.tight_layout()
+        plt.show()
 
 
     def validate_output(self, output_dict):

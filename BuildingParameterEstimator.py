@@ -170,7 +170,6 @@ class BuildingParameterEstimator:
 
         return output_dict_combined, self.chat_history
 
-
     def revise_schedule_compact(self, idf_path: str, schedule_name: str, hourly_values: list):
         """
         Revises a Schedule:Compact object in the IDF file with the provided hourly values.
@@ -181,27 +180,30 @@ class BuildingParameterEstimator:
         - hourly_values: List of 24 float values representing hourly schedule.
         """
         # Validate input length
-        print(hourly_values)
         if len(hourly_values) != 24:
             raise ValueError("Hourly values list must contain exactly 24 values.")
 
         # Load the IDF file
         IDF.setiddname("./ep-model/Energy+.idd")  
-        idf = IDF(idf_path)
+        self.idf = IDF(idf_path)
 
         # Find the Schedule:Compact object
-        schedules = idf.idfobjects['SCHEDULE:COMPACT']
+        schedules = self.idf.idfobjects['SCHEDULE:COMPACT']
         for schedule in schedules:
             if schedule.Name == schedule_name:
                 # Generate the "Until" time fields
-                until_times = [f"{i + 1:02}:00" for i in range(24)]
+                until_times = [f"Until: {i + 1:02}:00" for i in range(24)]
 
                 # Update the fields in Schedule:Compact
                 for i in range(24):
                     until_field = f"Field_{3 + (i * 2)}"  # Alternating "Until" fields
                     value_field = f"Field_{4 + (i * 2)}"  # Corresponding value fields
+
+                    # Format values properly
+                    formatted_value = f"{hourly_values[i]:.2f}".lstrip('0') if hourly_values[i] != 0 else "0.0"
+
                     setattr(schedule, until_field, until_times[i])  # Set "Until" time
-                    setattr(schedule, value_field, hourly_values[i])  # Set value
+                    setattr(schedule, value_field, formatted_value)  # Set value
 
                 print(f"Updated Schedule:Compact {schedule_name} with new hourly values.")
                 break
@@ -211,8 +213,17 @@ class BuildingParameterEstimator:
 
         # Save the updated IDF
         updated_idf_path = "./ep-model/updated_ep.idf"
-        idf.saveas(updated_idf_path)
+        self.idf.saveas(updated_idf_path)
         print(f"Updated IDF file saved at {updated_idf_path}")
+
+    def run_simulation(self, idf_path: str):
+        """Run the simulation using the updated IDF file."""
+        # Load the updated IDF file 
+        
+        epw_path = "./ep-model/USA_MT_Charlie.Stanford.720996_TMYx.2007-2021.epw"
+        updated_idf = IDF(idf_path, epw_path)
+        updated_idf.run(output_prefix = '_run', output_suffix = 'L', readvars=True)
+
 
     def validate_output(self, output_dict):
         """Validate and fix the output if needed."""

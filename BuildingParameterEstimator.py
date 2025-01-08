@@ -10,7 +10,7 @@ from matplotlib.ticker import MaxNLocator
 
 
 class BuildingParameterEstimator:
-    def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b"):
+    def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b"): #"llama3.3:latest"
         """Initialize the model and other required components."""
         self.model = ChatOllama(model=model_name, base_url=model_url)
         self.chat_history = []
@@ -73,8 +73,6 @@ class BuildingParameterEstimator:
         Ask these clarifying questions first:
         - "What are the typical hours of operation or occupancy?"
         - "Are there any specific times when the building is fully or minimally occupied?"
-
-        Building information: {text}
 
         {format_instructions}
         """
@@ -173,46 +171,49 @@ class BuildingParameterEstimator:
 
         return output_dict_combined, self.chat_history
 
-    def revise_schedule_compact(self, idf_path: str, schedule_name: str, hourly_values: list):
+    def revise_schedule_compact(self, idf_path: str, schedule_names: list, hourly_values: list):
         """
-        Revises a Schedule:Compact object in the IDF file with the provided hourly values.
+        Revises multiple Schedule:Compact objects in the IDF file with the provided hourly values.
 
         Parameters:
         - idf_path: Path to the IDF file.
-        - schedule_name: Name of the Schedule:Compact object to modify.
+        - schedule_names: List of Schedule:Compact object names to modify.
         - hourly_values: List of 24 float values representing hourly schedule.
         """
-        # Validate input length
+        # Validate input
         if len(hourly_values) != 24:
             raise ValueError("Hourly values list must contain exactly 24 values.")
+        if not isinstance(schedule_names, list) or not schedule_names:
+            raise ValueError("schedule_names must be a non-empty list.")
 
         # Load the IDF file
         IDF.setiddname("./ep-model/Energy+.idd")  
         self.idf = IDF(idf_path)
 
-        # Find the Schedule:Compact object
+        # Find and update the Schedule:Compact objects
         schedules = self.idf.idfobjects['SCHEDULE:COMPACT']
-        for schedule in schedules:
-            if schedule.Name == schedule_name:
-                # Generate the "Until" time fields
-                until_times = [f"Until: {i + 1:02}:00" for i in range(24)]
+        for schedule_name in schedule_names:
+            for schedule in schedules:
+                if schedule.Name == schedule_name:
+                    # Generate the "Until" time fields
+                    until_times = [f"Until: {i + 1:02}:00" for i in range(24)]
 
-                # Update the fields in Schedule:Compact
-                for i in range(24):
-                    until_field = f"Field_{3 + (i * 2)}"  # Alternating "Until" fields
-                    value_field = f"Field_{4 + (i * 2)}"  # Corresponding value fields
+                    # Update the fields in Schedule:Compact
+                    for i in range(24):
+                        until_field = f"Field_{3 + (i * 2)}"  # Alternating "Until" fields
+                        value_field = f"Field_{4 + (i * 2)}"  # Corresponding value fields
 
-                    # Format values properly
-                    formatted_value = f"{hourly_values[i]:.2f}".lstrip('0') if hourly_values[i] != 0 else "0.0"
+                        # Format values properly
+                        formatted_value = f"{hourly_values[i]:.2f}".lstrip('0') if hourly_values[i] != 0 else "0.0"
 
-                    setattr(schedule, until_field, until_times[i])  # Set "Until" time
-                    setattr(schedule, value_field, formatted_value)  # Set value
+                        setattr(schedule, until_field, until_times[i])  # Set "Until" time
+                        setattr(schedule, value_field, formatted_value)  # Set value
 
-                print(f"Updated Schedule:Compact {schedule_name} with new hourly values.")
-                break
-        else:
-            print(f"Schedule:Compact with name '{schedule_name}' not found.")
-            return
+                    print(f"Updated Schedule:Compact {schedule_name} with new hourly values.")
+                    break
+            else:
+                print(f"Schedule:Compact with name '{schedule_name}' not found.")
+                continue
 
         # Save the updated IDF
         updated_idf_path = "./ep-model/updated_ep.idf"
@@ -240,7 +241,7 @@ class BuildingParameterEstimator:
             # Sum the two columns row-wise and convert Joules to kWh (1 kWh = 3.6e6 J)
             df['energy'] = (df[electricity_col] + df[natural_gas_col])  / 3.6e6
             
-            self.summed_kwh = df['energy']
+            self.summed_kwh = df['energy'].iloc[-24:]
             
             # Ensure exactly 24 rows of results
             if len(self.summed_kwh) == 24:
@@ -251,9 +252,37 @@ class BuildingParameterEstimator:
 
         except Exception as e:
             print(f"An error occurred while processing the CSV file: {e}")
+        return self.summed_kwh.tolist()
+    
+    
+    def plot_schedule_data(self, schedule: list):
+
+        plt.figure(figsize=(10, 6))
+
+        # Create a stepwise plot
+        plt.step(range(1, 25), schedule, linewidth=2, color='blue')
+
+        plt.xlabel("Hour", fontname="Arial", fontsize=18)
+        plt.ylabel("Occupancy rate", fontname="Arial", fontsize=18)
+
+        # Customize the y-axis limits and ticks
+        plt.ylim(-0.05, 1.05)
+        plt.yticks([0, 0.2, 0.4, 0.6, 0.8, 1], fontname="Arial", fontsize=16)
+
+        # Customize the x-axis ticks and grid
+        plt.xticks(range(1, 25), fontname="Arial", fontsize=16)
+        plt.grid(True, linestyle="--")
+
+        # Ensure integer ticks on the x-axis
+        plt.gca().xaxis.set_major_locator(MaxNLocator(integer=True))
+
+        # Save and display the plot
+        plt.tight_layout()
+        plt.show()
+
 
     def plot_energy_data(self):
-        """Plot the energy data in an academic format using Arial font."""
+        
         plt.figure(figsize=(10, 6))
         
         # Create a stepwise plot

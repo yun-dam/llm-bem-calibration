@@ -281,12 +281,12 @@ class BuildingParameterEstimator:
         plt.show()
 
 
-    def plot_energy_data(self):
+    def plot_energy_data(self, simulation_result: list):
         
         plt.figure(figsize=(10, 6))
         
         # Create a stepwise plot
-        plt.plot(range(1, 25), self.summed_kwh, label="Total Energy [kWh]", linewidth=2, color='blue', marker='o', markersize=6)
+        plt.plot(range(1, 25), simulation_result, label="Total Energy [kWh]", linewidth=2, color='blue', marker='o', markersize=6)
 
         plt.xlabel("Hour", fontname="Arial", fontsize=18)
         plt.ylabel("Energy [kWh]", fontname="Arial", fontsize=18)

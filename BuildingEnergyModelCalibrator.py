@@ -13,7 +13,7 @@ import os
 import re
 import json
 
-class BuildingParameterOptimizer:
+class BuildingEnergyModelCalibrator:
     def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b"):
         """Initialize the model and optimization components."""
         self.model = ChatOllama(model=model_name, base_url=model_url)
@@ -30,35 +30,61 @@ class BuildingParameterOptimizer:
         """Run building simulation with given schedule."""
         # Update the IDF file with the new schedule
         idf_path = "./ep-model/updated_ep_opt.idf"
-        schedule_names = ["BLDG_LIGHT_SCH"]  
+        schedule_names =  ["BLDG_LIGHT_SCH", "BLDG_OCC_SCH", "BLDG_EQUIP_SCH"]
         self.revise_schedule_compact(idf_path, schedule_names, schedule)
         
         # Run simulation and get results
         updated_idf_path = "./ep-model/updated_ep.idf"
         return self.run_simulation(updated_idf_path)
         
-    def evaluate_loss(self, schedule, ground_truth):
-        """Calculate loss between simulation result and ground truth."""
-        simulated_output = self.run_building_simulation(schedule)
-        return np.mean(np.abs(np.array(simulated_output) - np.array(ground_truth)))
+    # def evaluate_loss(self, simulated_energy_consumption, ground_truth):
+    #     """Calculate loss between simulation result and ground truth."""
+        
+    #     return np.mean(np.abs(np.array(simulated_energy_consumption) - np.array(ground_truth)))
+    
+
+    def evaluate_loss(self, simulated_energy_consumption, ground_truth):
+        """Calculate CVRMSE between simulation result and ground truth."""
+        
+        # Convert inputs to numpy arrays
+        sim = np.array(simulated_energy_consumption)
+        gt = np.array(ground_truth)
+        
+        # Calculate the difference between simulated and ground truth values
+        diff = sim - gt
+        
+        # Calculate the mean of the ground truth values
+        mean_gt = np.mean(gt)
+        
+        # Calculate the Root Mean Square Error (RMSE)
+        rmse = np.sqrt(np.mean(diff**2))
+        
+        # Calculate the Coefficient of Variation of RMSE (CVRMSE)
+        cvrmse = (rmse / mean_gt) * 100  # Multiply by 100 to express as a percentage
+        
+        return cvrmse
 
     def optimize_parameters(self, ground_truth, num_iterations=50, num_starting_points=5):
         """Optimize building parameters to match ground truth."""
         # Initialize results storage
         datetime_str = str(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
-        save_folder = f"optimization_results_{datetime_str}"
-        os.makedirs(save_folder, exist_ok=True)
+        self.save_folder = f"optimization_results_{datetime_str}"
+        os.makedirs(self.save_folder, exist_ok=True)
         
         # Generate starting points
         np.random.seed(42)
         old_value_pairs_set = set()
         
         # Generate initial schedules (24 values between 0 and 1)
-        for _ in range(num_starting_points):
+        for start_point in range(num_starting_points):
             schedule = np.random.uniform(0, 1, 24)
-            loss = self.evaluate_loss(schedule, ground_truth)
+            energy_consumption = self.run_building_simulation(schedule)
+            loss = self.evaluate_loss(energy_consumption, ground_truth)
             old_value_pairs_set.add(tuple(list(schedule) + [loss]))
             
+            # Log initial schedule for each starting point
+            self._log_iteration(f"start_point_{start_point}", schedule, energy_consumption, loss)
+        
         best_loss = float('inf')
         best_schedule = None
         
@@ -74,8 +100,12 @@ class BuildingParameterOptimizer:
             print(new_schedules)
             # Evaluate new proposals
             for schedule in new_schedules:
-                loss = self.evaluate_loss(schedule, ground_truth)
+                energy_consumption = self.run_building_simulation(schedule)
+                loss = self.evaluate_loss(energy_consumption, ground_truth)
                 old_value_pairs_set.add(tuple(list(schedule) + [loss]))
+                
+                # Log each proposal
+                self._log_iteration(f"iteration_{iteration+1}", schedule, energy_consumption, loss)
                 
                 if loss < best_loss:
                     best_loss = loss
@@ -83,13 +113,13 @@ class BuildingParameterOptimizer:
                     print(f"New best loss: {best_loss}")
             
             # Save intermediate results
-            self._save_results(save_folder, {
+            self._save_results(self.save_folder, {
                 'iteration': iteration,
                 'best_loss': best_loss,
                 'best_schedule': best_schedule.tolist() if best_schedule is not None else None,
                 'current_pairs': list(old_value_pairs_set)
             })
-            
+        
         return best_schedule, best_loss
 
     def _generate_meta_prompt(self, old_value_pairs_set, ground_truth):
@@ -145,20 +175,54 @@ class BuildingParameterOptimizer:
         plt.grid(True)
         plt.show()
 
-    def revise_schedule_compact(self, idf_path, schedule_names, hourly_values):
-        """Update IDF schedule with new values."""
-        IDF.setiddname("./ep-model/Energy+.idd")
-        idf = IDF(idf_path)
-        
+    def revise_schedule_compact(self, idf_path: str, schedule_names: list, hourly_values: list):
+        """
+        Revises multiple Schedule:Compact objects in the IDF file with the provided hourly values.
+
+        Parameters:
+        - idf_path: Path to the IDF file.
+        - schedule_names: List of Schedule:Compact object names to modify.
+        - hourly_values: List of 24 float values representing hourly schedule.
+        """
+        # Validate input
+        if len(hourly_values) != 24:
+            raise ValueError("Hourly values list must contain exactly 24 values.")
+        if not isinstance(schedule_names, list) or not schedule_names:
+            raise ValueError("schedule_names must be a non-empty list.")
+
+        # Load the IDF file
+        IDF.setiddname("./ep-model/Energy+.idd")  
+        self.idf = IDF(idf_path)
+
+        # Find and update the Schedule:Compact objects
+        schedules = self.idf.idfobjects['SCHEDULE:COMPACT']
         for schedule_name in schedule_names:
-            schedule = idf.idfobjects['SCHEDULE:COMPACT'][0]
-            for i in range(24):
-                until_field = f"Field_{3 + (i * 2)}"
-                value_field = f"Field_{4 + (i * 2)}"
-                setattr(schedule, until_field, f"Until: {i + 1:02}:00")
-                setattr(schedule, value_field, f"{hourly_values[i]:.3f}")
-        
-        idf.saveas("./ep-model/updated_ep.idf")
+            for schedule in schedules:
+                if schedule.Name == schedule_name:
+                    # Generate the "Until" time fields
+                    until_times = [f"Until: {i + 1:02}:00" for i in range(24)]
+
+                    # Update the fields in Schedule:Compact
+                    for i in range(24):
+                        until_field = f"Field_{3 + (i * 2)}"  # Alternating "Until" fields
+                        value_field = f"Field_{4 + (i * 2)}"  # Corresponding value fields
+
+                        # Format values properly
+                        formatted_value = f"{hourly_values[i]:.2f}".lstrip('0') if hourly_values[i] != 0 else "0.0"
+
+                        setattr(schedule, until_field, until_times[i])  # Set "Until" time
+                        setattr(schedule, value_field, formatted_value)  # Set value
+
+                    print(f"Updated Schedule:Compact {schedule_name} with new hourly values.")
+                    break
+            else:
+                print(f"Schedule:Compact with name '{schedule_name}' not found.")
+                continue
+
+        # Save the updated IDF
+        updated_idf_path = "./ep-model/updated_ep.idf"
+        self.idf.saveas(updated_idf_path)
+        print(f"Updated IDF file saved at {updated_idf_path}")
 
     def run_simulation(self, idf_path: str):
         """Run the simulation using the updated IDF file and process the generated energy data."""
@@ -196,3 +260,25 @@ class BuildingParameterOptimizer:
             print(f"An error occurred while processing the CSV file: {e}")
         return self.summed_kwh.tolist()
     
+    def _log_iteration(self, iteration, schedule, energy_consumption, loss):
+        """Log iteration details including schedule, energy consumption, and loss."""
+        log_entry = {
+            'iteration': iteration,
+            'schedule': schedule.tolist(),
+            'energy_consumption': energy_consumption,
+            'loss': loss
+        }
+        
+        log_file = f"{self.save_folder}/iteration_log.json"
+        
+        if os.path.exists(log_file):
+            with open(log_file, 'r+') as f:
+                log_data = json.load(f)
+                log_data.append(log_entry)
+                f.seek(0)
+                json.dump(log_data, f, indent=4)
+        else:
+            with open(log_file, 'w') as f:
+                json.dump([log_entry], f, indent=4)
+        
+        print(f"Logged iteration {iteration} details.")

@@ -29,7 +29,7 @@ class BuildingEnergyModelCalibrator:
     def run_building_simulation(self, schedule):
         """Run building simulation with given schedule."""
         # Update the IDF file with the new schedule
-        idf_path = "./ep-model/updated_ep_opt.idf"
+        idf_path = "./ep-model/updated_ep_opt_same_internal_loads.idf"
         schedule_names =  ["BLDG_LIGHT_SCH", "BLDG_OCC_SCH", "BLDG_EQUIP_SCH"]
         self.revise_schedule_compact(idf_path, schedule_names, schedule)
         
@@ -40,30 +40,34 @@ class BuildingEnergyModelCalibrator:
     # def evaluate_loss(self, simulated_energy_consumption, ground_truth):
     #     """Calculate loss between simulation result and ground truth."""
         
-    #     return np.mean(np.abs(np.array(simulated_energy_consumption) - np.array(ground_truth)))
+    #     loss = np.mean(np.abs(np.array(simulated_energy_consumption) - np.array(ground_truth)))
+
+    #     print(f"LOSS: {loss:.2f}")
+    #     return loss
     
 
     def evaluate_loss(self, simulated_energy_consumption, ground_truth):
-        """Calculate CVRMSE between simulation result and ground truth."""
+        """Calculate CVRMSE following ASHRAE Guideline 14-2014."""
         
         # Convert inputs to numpy arrays
         sim = np.array(simulated_energy_consumption)
         gt = np.array(ground_truth)
         
-        # Calculate the difference between simulated and ground truth values
-        diff = sim - gt
-        
         # Calculate the mean of the ground truth values
         mean_gt = np.mean(gt)
-        
-        # Calculate the Root Mean Square Error (RMSE)
-        rmse = np.sqrt(np.mean(diff**2))
-        
-        # Calculate the Coefficient of Variation of RMSE (CVRMSE)
-        cvrmse = (rmse / mean_gt) * 100  # Multiply by 100 to express as a percentage
-        
-        return cvrmse
 
+        # Ensure mean_gt is not zero to avoid division errors
+        if mean_gt == 0:
+            raise ValueError("Mean of ground truth values is zero, cannot compute CVRMSE.")
+
+        # Calculate RMSE using N-1
+        rmse = np.sqrt(np.sum((sim - gt) ** 2) / (len(gt) - 1))
+
+        # Calculate CVRMSE (expressed as a percentage)
+        cvrmse = (rmse / mean_gt) * 100
+        print(f"CVRMSE: {cvrmse:.2f}%")
+
+        return cvrmse
     def optimize_parameters(self, ground_truth, num_iterations=50, num_starting_points=5):
         """Optimize building parameters to match ground truth."""
         # Initialize results storage
@@ -75,9 +79,19 @@ class BuildingEnergyModelCalibrator:
         np.random.seed(42)
         old_value_pairs_set = set()
         
+        base_schedule = np.array([
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.95, 0.95, 
+                0.95, 0.95, 0.5, 0.95, 0.95, 0.95, 0.95, 0.7, 0.4, 0.4, 
+                0.1, 0.1, 0.05, 0.05
+        ])
+
+        noise_factor = 0.1
+
         # Generate initial schedules (24 values between 0 and 1)
         for start_point in range(num_starting_points):
-            schedule = np.random.uniform(0, 1, 24)
+            noise = np.random.uniform(-noise_factor, noise_factor, base_schedule.shape) * base_schedule
+            schedule = np.clip(base_schedule + noise, 0, 1)
+            
             energy_consumption = self.run_building_simulation(schedule)
             loss = self.evaluate_loss(energy_consumption, ground_truth)
             old_value_pairs_set.add(tuple(list(schedule) + [loss]))
@@ -97,7 +111,7 @@ class BuildingEnergyModelCalibrator:
             
             # Get new proposals from LLM
             new_schedules = self._get_llm_proposals(meta_prompt)
-            print(new_schedules)
+            
             # Evaluate new proposals
             for schedule in new_schedules:
                 energy_consumption = self.run_building_simulation(schedule)
@@ -111,6 +125,20 @@ class BuildingEnergyModelCalibrator:
                     best_loss = loss
                     best_schedule = schedule
                     print(f"New best loss: {best_loss}")
+                
+                # Stopping criterion
+                if best_loss < 30:
+                    print(f"Stopping early: best loss {best_loss} is below threshold")
+                
+                    # Save final results
+                    self._save_results(self.save_folder, {
+                        'iteration': iteration,
+                        'best_loss': best_loss,
+                        'best_schedule': best_schedule.tolist() if best_schedule is not None else None,
+                        'current_pairs': list(old_value_pairs_set)
+                    })
+
+                    return best_schedule, best_loss
             
             # Save intermediate results
             self._save_results(self.save_folder, {
@@ -121,6 +149,7 @@ class BuildingEnergyModelCalibrator:
             })
         
         return best_schedule, best_loss
+
 
     def _generate_meta_prompt(self, old_value_pairs_set, ground_truth):
         """Generate meta prompt for LLM."""
@@ -141,6 +170,9 @@ class BuildingEnergyModelCalibrator:
         
         Propose a new schedule that might achieve lower loss. Output should be exactly 24 numbers between 0 and 1.
         Consider typical building occupancy patterns (e.g., higher during work hours, lower at night).
+
+        Higher occupancy typically increases heating, cooling, and ventilation demands, while unoccupied periods allow for energy-saving. Dynamic schedules, such as flexible work hours or intermittent use, create variability in energy demand. Accurate occupancy modeling is crucial for optimizing energy efficiency, as overestimating leads to wasted energy, while underestimating compromises comfort and performance.
+
         """
 
     def _get_llm_proposals(self, meta_prompt, num_proposals=5):
@@ -251,8 +283,8 @@ class BuildingEnergyModelCalibrator:
             
             # Ensure exactly 24 rows of results
             if len(self.summed_kwh) == 24:
-                print("Summed energy values in kWh for rows 2 to 25:")
-                print(self.summed_kwh.reset_index(drop=True))  # Display 24 summed rows
+                
+                print(self.summed_kwh.reset_index(drop=True)) 
             else:
                 print(f"Unexpected number of rows in the extracted data: {len(self.summed_kwh)}")
 

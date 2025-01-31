@@ -26,15 +26,15 @@ class BuildingEnergyModelCalibrator:
             "stop": None,
         }
         
-    def run_building_simulation(self, schedule):
+    def run_building_simulation(self, idf_path: str, schedule):
         """Run building simulation with given schedule."""
         # Update the IDF file with the new schedule
-        idf_path = "./ep-model/updated_ep_opt_same_internal_loads.idf"
+        
         schedule_names =  ["BLDG_LIGHT_SCH", "BLDG_OCC_SCH", "BLDG_EQUIP_SCH"]
         self.revise_schedule_compact(idf_path, schedule_names, schedule)
         
         # Run simulation and get results
-        updated_idf_path = "./ep-model/updated_ep.idf"
+        updated_idf_path = idf_path[:-4] + "_revised.idf"
         return self.run_simulation(updated_idf_path)
         
     # def evaluate_loss(self, simulated_energy_consumption, ground_truth):
@@ -68,7 +68,8 @@ class BuildingEnergyModelCalibrator:
         print(f"CVRMSE: {cvrmse:.2f}%")
 
         return cvrmse
-    def optimize_parameters(self, ground_truth, num_iterations=50, num_starting_points=5):
+    
+    def optimize_parameters(self, base_idf_path: str, ground_truth, num_iterations=50, num_starting_points=5):
         """Optimize building parameters to match ground truth."""
         # Initialize results storage
         datetime_str = str(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
@@ -86,13 +87,21 @@ class BuildingEnergyModelCalibrator:
         ])
 
         noise_factor = 0.1
+        
+        # Extract base name for simulation files
+        base_name = os.path.splitext(os.path.basename(base_idf_path))[0]
 
         # Generate initial schedules (24 values between 0 and 1)
         for start_point in range(num_starting_points):
+            # Create a unique simulation file for this starting point
+            unique_idf_name = f"{base_name}_start_point_{start_point}.idf"
+            unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
+            self._copy_idf_file(base_idf_path, unique_idf_path)
+            
             noise = np.random.uniform(-noise_factor, noise_factor, base_schedule.shape) * base_schedule
             schedule = np.clip(base_schedule + noise, 0, 1)
             
-            energy_consumption = self.run_building_simulation(schedule)
+            energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
             loss = self.evaluate_loss(energy_consumption, ground_truth)
             old_value_pairs_set.add(tuple(list(schedule) + [loss]))
             
@@ -113,8 +122,13 @@ class BuildingEnergyModelCalibrator:
             new_schedules = self._get_llm_proposals(meta_prompt)
             
             # Evaluate new proposals
-            for schedule in new_schedules:
-                energy_consumption = self.run_building_simulation(schedule)
+            for idx, schedule in enumerate(new_schedules):
+                # Create a unique simulation file for this proposal
+                unique_idf_name = f"{base_name}_iteration_{iteration}_proposal_{idx}.idf"
+                unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
+                self._copy_idf_file(base_idf_path, unique_idf_path)
+                
+                energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
                 loss = self.evaluate_loss(energy_consumption, ground_truth)
                 old_value_pairs_set.add(tuple(list(schedule) + [loss]))
                 
@@ -150,6 +164,16 @@ class BuildingEnergyModelCalibrator:
         
         return best_schedule, best_loss
 
+    def _copy_idf_file(self, source_path: str, destination_path: str):
+        """Helper method to copy IDF file while ensuring the destination directory exists."""
+        try:
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            with open(source_path, 'r') as source, open(destination_path, 'w') as dest:
+                dest.write(source.read())
+            print(f"Successfully copied IDF file to: {destination_path}")
+        except Exception as e:
+            print(f"Error copying IDF file: {e}")
+            raise
 
     def _generate_meta_prompt(self, old_value_pairs_set, ground_truth):
         """Generate meta prompt for LLM."""
@@ -199,7 +223,7 @@ class BuildingEnergyModelCalibrator:
         """Plot comparison between best schedule and ground truth."""
         plt.figure(figsize=(12, 6))
         plt.plot(range(24), ground_truth, 'b-', label='Ground Truth', marker='o')
-        plt.plot(range(24), self.run_building_simulation(best_schedule), 'r--', 
+        plt.plot(range(24), self.run_building_simulation(idf_path, best_schedule), 'r--', 
                 label='Best Simulation', marker='x')
         plt.xlabel('Hour')
         plt.ylabel('Energy Consumption (kWh)')
@@ -252,21 +276,23 @@ class BuildingEnergyModelCalibrator:
                 continue
 
         # Save the updated IDF
-        updated_idf_path = "./ep-model/updated_ep.idf"
+        updated_idf_path = idf_path[:-4] + "_revised.idf"
         self.idf.saveas(updated_idf_path)
         print(f"Updated IDF file saved at {updated_idf_path}")
 
     def run_simulation(self, idf_path: str):
         """Run the simulation using the updated IDF file and process the generated energy data."""
         # Load the updated IDF file
-        epw_path = r"./ep-model/USA_MT_Charlie.Stanford.720996_TMYx.2007-2021.epw"
+        epw_path = r"./ep-model/stanford_mountain_view.epw"
         updated_idf = IDF(idf_path, epw_path)
 
         print(f"Starting simulation with IDF file: {os.path.basename(idf_path)}")
-        updated_idf.run(output_prefix='_run', output_suffix='C', readvars=True, output_directory='./ep-model')
+        file_name = os.path.basename(idf_path)[:-4]
+
+        updated_idf.run(output_prefix=file_name, output_suffix='C', readvars=True, output_directory='./ep-model')
             
         # Path to the generated CSV file
-        csv_file_path = './ep-model/_runMeter.csv'
+        csv_file_path = './ep-model/' + file_name + "Meter.csv"
 
         try:
             # Load the generated CSV data

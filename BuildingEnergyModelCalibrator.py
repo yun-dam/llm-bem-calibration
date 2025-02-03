@@ -64,7 +64,7 @@ class BuildingEnergyModelCalibrator:
         rmse = np.sqrt(np.sum((sim - gt) ** 2) / (len(gt) - 1))
 
         # Calculate CVRMSE (expressed as a percentage)
-        cvrmse = (rmse / mean_gt) * 100
+        cvrmse = round((rmse / mean_gt) * 100, 2)
         print(f"CVRMSE: {cvrmse:.2f}%")
 
         return cvrmse
@@ -80,13 +80,15 @@ class BuildingEnergyModelCalibrator:
         np.random.seed(42)
         old_value_pairs_set = set()
         
-        base_schedule = np.array([
-                0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.95, 0.95, 
-                0.95, 0.95, 0.5, 0.95, 0.95, 0.95, 0.95, 0.7, 0.4, 0.4, 
-                0.1, 0.1, 0.05, 0.05
-        ])
+        # base_schedule = np.array([
+        #         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.95, 0.95, 
+        #         0.95, 0.95, 0.5, 0.95, 0.95, 0.95, 0.95, 0.7, 0.4, 0.4, 
+        #         0.1, 0.1, 0.05, 0.05
+        # ])
+        
+        
 
-        noise_factor = 0.1
+        # noise_factor = 0.1
         
         # Extract base name for simulation files
         base_name = os.path.splitext(os.path.basename(base_idf_path))[0]
@@ -98,12 +100,15 @@ class BuildingEnergyModelCalibrator:
             unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
             self._copy_idf_file(base_idf_path, unique_idf_path)
             
-            noise = np.random.uniform(-noise_factor, noise_factor, base_schedule.shape) * base_schedule
-            schedule = np.clip(base_schedule + noise, 0, 1)
+            # noise = np.random.uniform(-noise_factor, noise_factor, base_schedule.shape) * base_schedule
+            # schedule = np.clip(base_schedule + noise, 0, 1)
+
+            schedule = np.random.uniform(low=0, high=1, size=24)
+            schedule = np.round(schedule, 2)
             
             energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
             loss = self.evaluate_loss(energy_consumption, ground_truth)
-            old_value_pairs_set.add(tuple(list(schedule) + [loss]))
+            old_value_pairs_set.add(tuple([round(x, 2) for x in list(schedule)] + energy_consumption + [loss]))
             
             # Log initial schedule for each starting point
             self._log_iteration(f"start_point_{start_point}", schedule, energy_consumption, loss)
@@ -124,13 +129,13 @@ class BuildingEnergyModelCalibrator:
             # Evaluate new proposals
             for idx, schedule in enumerate(new_schedules):
                 # Create a unique simulation file for this proposal
-                unique_idf_name = f"{base_name}_iteration_{iteration}_proposal_{idx}.idf"
+                unique_idf_name = f"{base_name}_proposal_{idx}.idf"
                 unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
                 self._copy_idf_file(base_idf_path, unique_idf_path)
                 
                 energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
                 loss = self.evaluate_loss(energy_consumption, ground_truth)
-                old_value_pairs_set.add(tuple(list(schedule) + [loss]))
+                old_value_pairs_set.add(tuple([round(x, 2) for x in list(schedule)] + energy_consumption + [loss]))
                 
                 # Log each proposal
                 self._log_iteration(f"iteration_{iteration+1}", schedule, energy_consumption, loss)
@@ -141,7 +146,7 @@ class BuildingEnergyModelCalibrator:
                     print(f"New best loss: {best_loss}")
                 
                 # Stopping criterion
-                if best_loss < 30:
+                if best_loss < 5:
                     print(f"Stopping early: best loss {best_loss} is below threshold")
                 
                     # Save final results
@@ -175,28 +180,82 @@ class BuildingEnergyModelCalibrator:
             print(f"Error copying IDF file: {e}")
             raise
 
+    # def _generate_meta_prompt(self, old_value_pairs_set, ground_truth):
+    #     """Generate meta prompt for LLM."""
+    #     pairs_str = "\n".join([
+    #         f"schedule: {list(pair[:-1])}\nloss: {pair[-1]}"
+    #         for pair in sorted(old_value_pairs_set, key=lambda x: x[-1])[:10]
+    #     ])
+        
+    #     return f"""
+    #     Help me optimize a 24-hour building occupancy schedule to match a target energy consumption pattern.
+    #     The schedule should contain 24 values between 0 and 1 representing hourly occupancy rates.
+        
+    #     Previous attempts and their losses:
+    #     {pairs_str}
+        
+    #     Target energy consumption pattern:
+    #     {ground_truth}
+        
+    #     Propose a new schedule that might achieve lower loss. Output should be exactly 24 numbers between 0 and 1.
+    #     Consider typical building occupancy patterns (e.g., higher during work hours, lower at night).
+
+    #     Higher occupancy typically increases heating, cooling, and ventilation demands, while unoccupied periods allow for energy-saving. Dynamic schedules, such as flexible work hours or intermittent use, create variability in energy demand. Accurate occupancy modeling is crucial for optimizing energy efficiency, as overestimating leads to wasted energy, while underestimating compromises comfort and performance.
+
+    #     """
+
     def _generate_meta_prompt(self, old_value_pairs_set, ground_truth):
-        """Generate meta prompt for LLM."""
-        pairs_str = "\n".join([
-            f"schedule: {list(pair[:-1])}\nloss: {pair[-1]}"
-            for pair in sorted(old_value_pairs_set, key=lambda x: x[-1])[:10]
-        ])
+        """Generate meta prompt for LLM with structured previous attempts data."""
+        # Convert the set of tuples into list of dictionaries
+        previous_attempts = []
+        for pair in sorted(old_value_pairs_set, key=lambda x: x[-1])[:10]:  # Get top 10 best attempts
+            # Split the tuple into its components:
+            # First 24 values are schedule
+            # Next 24 values are energy consumption
+            # Last value is loss
+            schedule = list(pair[:24])
+            energy_consumption = list(pair[24:-1])
+            loss = pair[-1]
+            
+            attempt_dict = {
+                "schedule": schedule,
+                "energy_consumption": energy_consumption,
+                "loss": loss
+            }
+            previous_attempts.append(attempt_dict)
+        
+        # Format the previous attempts for the prompt
+        attempts_str = ""
+        for i, attempt in enumerate(previous_attempts, 1):
+            attempts_str += f"\nAttempt {i}:\n"
+            attempts_str += f"Schedule: {attempt['schedule']}\n"
+            attempts_str += f"Energy Consumption (kWh): {attempt['energy_consumption']}\n"
+            attempts_str += f"Loss (CVRMSE): {attempt['loss']:.2f}%\n"
         
         return f"""
         Help me optimize a 24-hour building occupancy schedule to match a target energy consumption pattern.
         The schedule should contain 24 values between 0 and 1 representing hourly occupancy rates.
         
-        Previous attempts and their losses:
-        {pairs_str}
+        Previous attempts and their results:{attempts_str}
         
-        Target energy consumption pattern:
+        Target energy consumption pattern (kWh):
         {ground_truth}
         
-        Propose a new schedule that might achieve lower loss. Output should be exactly 24 numbers between 0 and 1.
-        Consider typical building occupancy patterns (e.g., higher during work hours, lower at night).
-
-        Higher occupancy typically increases heating, cooling, and ventilation demands, while unoccupied periods allow for energy-saving. Dynamic schedules, such as flexible work hours or intermittent use, create variability in energy demand. Accurate occupancy modeling is crucial for optimizing energy efficiency, as overestimating leads to wasted energy, while underestimating compromises comfort and performance.
-
+        Please analyze the previous attempts and propose a new schedule that might achieve lower loss, considering:
+        1. The relationship between schedules and their resulting energy consumption
+        2. Patterns in more successful attempts (lower loss values)
+        3. How schedule changes affect energy consumption throughout the day
+        4. Building energy usage characteristics:
+        - Higher occupancy typically increases HVAC and lighting demands
+        - Unoccupied periods allow for energy savings
+        - Dynamic schedules can create variable energy demand patterns
+        
+        Output should be exactly 24 numbers between 0 and 1 (with up to two decimal points), representing hourly occupancy rates.
+        Focus on creating realistic occupancy patterns (e.g., higher during work hours, lower at night)
+        while optimizing to match the target energy consumption pattern.
+        
+        Note: Compare how the energy consumption values differ from the target at each hour and adjust
+        the schedule accordingly to minimize these differences.
         """
 
     def _get_llm_proposals(self, meta_prompt, num_proposals=5):
@@ -208,7 +267,7 @@ class BuildingEnergyModelCalibrator:
                 # Extract numbers from response and validate
                 numbers = [float(x) for x in re.findall(r"0?\.[0-9]+|[01]", response.content)]
                 if len(numbers) >= 24:
-                    schedule = np.clip(numbers[:24], 0, 1)
+                    schedule = np.round(np.clip(numbers[:24], 0, 1), 2)
                     proposals.append(schedule)
             except:
                 continue
@@ -316,7 +375,7 @@ class BuildingEnergyModelCalibrator:
 
         except Exception as e:
             print(f"An error occurred while processing the CSV file: {e}")
-        return self.summed_kwh.tolist()
+        return [round(x, 2) for x in self.summed_kwh.tolist()]
     
     def _log_iteration(self, iteration, schedule, energy_consumption, loss):
         """Log iteration details including schedule, energy consumption, and loss."""

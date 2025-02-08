@@ -14,14 +14,17 @@ import re
 import json
 
 class BuildingEnergyModelCalibrator:
-    def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b"):
+    def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b", temperature=0.7):
         """Initialize the model and optimization components."""
-        self.model = ChatOllama(model=model_name, base_url=model_url)
+        self.model = ChatOllama(
+            model=model_name, 
+            base_url=model_url,
+            temperature=temperature
+        )
         self.chat_history = []
         self.optimizer_llm_dict = {
             "model_type": "llama3.2",
-            "temperature": 1.0,
-            "max_tokens": 1024,
+            "temperature": temperature,
             "top_p": 1,
             "stop": None,
         }
@@ -37,37 +40,37 @@ class BuildingEnergyModelCalibrator:
         updated_idf_path = idf_path[:-4] + "_revised.idf"
         return self.run_simulation(updated_idf_path)
         
-    # def evaluate_loss(self, simulated_energy_consumption, ground_truth):
-    #     """Calculate loss between simulation result and ground truth."""
+    def evaluate_loss(self, simulated_energy_consumption, ground_truth):
+        """Calculate loss between simulation result and ground truth."""
         
-    #     loss = np.mean(np.abs(np.array(simulated_energy_consumption) - np.array(ground_truth)))
+        loss = np.mean(np.abs(np.array(simulated_energy_consumption) - np.array(ground_truth)))
 
-    #     print(f"LOSS: {loss:.2f}")
-    #     return loss
+        print(f"LOSS: {loss:.2f}")
+        return loss
     
 
-    def evaluate_loss(self, simulated_energy_consumption, ground_truth):
-        """Calculate CVRMSE following ASHRAE Guideline 14-2014."""
+    # def evaluate_loss(self, simulated_energy_consumption, ground_truth):
+    #     """Calculate CVRMSE following ASHRAE Guideline 14-2014."""
         
-        # Convert inputs to numpy arrays
-        sim = np.array(simulated_energy_consumption)
-        gt = np.array(ground_truth)
+    #     # Convert inputs to numpy arrays
+    #     sim = np.array(simulated_energy_consumption)
+    #     gt = np.array(ground_truth)
         
-        # Calculate the mean of the ground truth values
-        mean_gt = np.mean(gt)
+    #     # Calculate the mean of the ground truth values
+    #     mean_gt = np.mean(gt)
 
-        # Ensure mean_gt is not zero to avoid division errors
-        if mean_gt == 0:
-            raise ValueError("Mean of ground truth values is zero, cannot compute CVRMSE.")
+    #     # Ensure mean_gt is not zero to avoid division errors
+    #     if mean_gt == 0:
+    #         raise ValueError("Mean of ground truth values is zero, cannot compute CVRMSE.")
 
-        # Calculate RMSE using N-1
-        rmse = np.sqrt(np.sum((sim - gt) ** 2) / (len(gt) - 1))
+    #     # Calculate RMSE using N-1
+    #     rmse = np.sqrt(np.sum((sim - gt) ** 2) / (len(gt) - 1))
 
-        # Calculate CVRMSE (expressed as a percentage)
-        cvrmse = round((rmse / mean_gt) * 100, 2)
-        print(f"CVRMSE: {cvrmse:.2f}%")
+    #     # Calculate CVRMSE (expressed as a percentage)
+    #     cvrmse = round((rmse / mean_gt) * 100, 2)
+    #     print(f"CVRMSE: {cvrmse:.2f}%")
 
-        return cvrmse
+    #     return cvrmse
     
     def optimize_parameters(self, base_idf_path: str, ground_truth, num_iterations=50, num_starting_points=5):
         """Optimize building parameters to match ground truth."""
@@ -103,7 +106,7 @@ class BuildingEnergyModelCalibrator:
             # noise = np.random.uniform(-noise_factor, noise_factor, base_schedule.shape) * base_schedule
             # schedule = np.clip(base_schedule + noise, 0, 1)
 
-            schedule = np.random.uniform(low=0, high=1, size=24)
+            schedule = np.random.uniform(0, 1, 24)
             schedule = np.round(schedule, 2)
             
             energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
@@ -332,6 +335,55 @@ class BuildingEnergyModelCalibrator:
                     break
             else:
                 print(f"Schedule:Compact with name '{schedule_name}' not found.")
+                continue
+
+        # Save the updated IDF
+        updated_idf_path = idf_path[:-4] + "_revised.idf"
+        self.idf.saveas(updated_idf_path)
+        print(f"Updated IDF file saved at {updated_idf_path}")
+
+    def revise_schedule_interval(self, idf_path: str, schedule_names: list, hourly_values: list):
+        """
+        Revises multiple Schedule:Compact objects in the IDF file with the provided hourly values.
+
+        Parameters:
+        - idf_path: Path to the IDF file.
+        - schedule_names: List of Schedule:Compact object names to modify.
+        - hourly_values: List of 24 float values representing hourly schedule.
+        """
+        # Validate input
+        if len(hourly_values) != 24:
+            raise ValueError("Hourly values list must contain exactly 24 values.")
+        if not isinstance(schedule_names, list) or not schedule_names:
+            raise ValueError("schedule_names must be a non-empty list.")
+
+        # Load the IDF file
+        IDF.setiddname("./ep-model/Energy+.idd")  
+        self.idf = IDF(idf_path)
+
+        # Find and update the Schedule:Compact objects
+        schedules = self.idf.idfobjects['SCHEDULE:DAY:INTERVAL']
+        for schedule_name in schedule_names:
+            for schedule in schedules:
+                if schedule.Name == schedule_name:
+                    # Generate the "Until" time fields
+                    until_times = [f"{i + 1:02}:00" for i in range(24)]
+
+                    # Update the fields in Schedule:Compact
+                    for i in range(24):
+                        until_field = f"Time_{(i + 1)}"  # Alternating "Until" fields
+                        value_field = f"Value_Until_Time_{(i + 1)}"  # Corresponding value fields
+
+                        # Format values properly
+                        formatted_value = f"{hourly_values[i]:.2f}".lstrip('0') if hourly_values[i] != 0 else "0.0"
+
+                        setattr(schedule, until_field, until_times[i])  # Set "Until" time
+                        setattr(schedule, value_field, formatted_value)  # Set value
+
+                    print(f"Updated Schedule:Day:Interval {schedule_name} with new hourly values.")
+                    break
+            else:
+                print(f"Schedule:Day:Interval with name '{schedule_name}' not found.")
                 continue
 
         # Save the updated IDF

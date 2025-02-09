@@ -14,21 +14,56 @@ import re
 import json
 
 class BuildingEnergyModelCalibrator:
-    def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b", temperature=0.7):
-        """Initialize the model and optimization components."""
+    def __init__(self, model_url="http://localhost:11434/", model_name="llama3.2:3b", use_dynamic_temp=True):
+        """
+        Initialize the model and optimization components.
+        
+        Args:
+            model_url (str): URL for the model API
+            model_name (str): Name of the model to use
+            use_dynamic_temp (bool): Whether to use dynamic temperature adjustment
+        """
+        self.model_url = model_url
+        self.model_name = model_name
+        self.use_dynamic_temp = use_dynamic_temp
+        self.chat_history = []
+        
+        # Initialize with default temperature - will be updated dynamically if enabled
+        self._update_model(0.7)
+
+    def get_dynamic_temperature(self, iteration, total_iterations):
+        """
+        Calculate temperature based on optimization progress.
+        
+        Args:
+            iteration (int): Current iteration
+            total_iterations (int): Total number of iterations
+            
+        Returns:
+            float: Temperature value between 0 and 1
+        """
+        progress = iteration / total_iterations
+        if progress < 0.2:
+            return 0.7  # Early exploration phase
+        elif progress < 0.8:
+            return 0.4  # Main optimization phase
+        else:
+            return 0.2  # Fine-tuning phase
+
+    def _update_model(self, temperature):
+        """Update model with new temperature setting."""
         self.model = ChatOllama(
-            model=model_name, 
-            base_url=model_url,
+            model=self.model_name,
+            base_url=self.model_url,
             temperature=temperature
         )
-        self.chat_history = []
         self.optimizer_llm_dict = {
             "model_type": "llama3.2",
             "temperature": temperature,
             "top_p": 1,
             "stop": None,
         }
-        
+
     def run_building_simulation(self, idf_path: str, schedule):
         """Run building simulation with given schedule."""
         # Update the IDF file with the new schedule
@@ -71,67 +106,109 @@ class BuildingEnergyModelCalibrator:
     #     print(f"CVRMSE: {cvrmse:.2f}%")
 
     #     return cvrmse
-    
-    def optimize_parameters(self, base_idf_path: str, ground_truth, num_iterations=50, num_starting_points=5):
-        """Optimize building parameters to match ground truth."""
+
+    def load_previous_results(self, results_path):
+        """Load previous optimization results from results.json file."""
+        if not results_path or not os.path.exists(results_path):
+            print(f"No results file found at: {results_path}")
+            return set(), None, float('inf')
+            
+        try:
+            with open(results_path, 'r') as f:
+                results_data = json.load(f)
+            
+            # Convert previous pairs into the format used by old_value_pairs_set
+            old_value_pairs_set = set()
+            for pair in results_data.get('current_pairs', []):
+                # Convert list to tuple for set storage
+                value_pair = tuple(round(x, 2) for x in pair)
+                old_value_pairs_set.add(value_pair)
+                
+            # Get best schedule and loss
+            best_schedule = results_data.get('best_schedule')
+            best_loss = results_data.get('best_loss', float('inf'))
+            
+            if best_schedule is not None:
+                best_schedule = np.array(best_schedule)
+            
+            print(f"Loaded {len(old_value_pairs_set)} previous results from {results_path}")
+            print(f"Previous best loss: {best_loss}")
+            
+            return old_value_pairs_set, best_schedule, best_loss
+        except Exception as e:
+            print(f"Error loading previous results: {e}")
+            return set(), None, float('inf')
+
+    def optimize_parameters(self, base_idf_path: str, ground_truth, num_iterations=50, num_starting_points=5, previous_results_path=None):
+        """
+        Optimize building parameters to match ground truth.
+        
+        Args:
+            base_idf_path (str): Path to the base IDF file
+            ground_truth: Target energy consumption values
+            num_iterations (int): Number of optimization iterations
+            num_starting_points (int): Number of initial points to try
+            previous_results_path (str, optional): Path to previous results.json file to continue from
+        """
         # Initialize results storage
         datetime_str = str(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S"))
         self.save_folder = f"optimization_results_{datetime_str}"
         os.makedirs(self.save_folder, exist_ok=True)
         
-        # Generate starting points
-        np.random.seed(42)
-        old_value_pairs_set = set()
-        
-        # base_schedule = np.array([
-        #         0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.95, 0.95, 
-        #         0.95, 0.95, 0.5, 0.95, 0.95, 0.95, 0.95, 0.7, 0.4, 0.4, 
-        #         0.1, 0.1, 0.05, 0.05
-        # ])
-        
-        
-
-        # noise_factor = 0.1
+        # Initialize or load previous results
+        if previous_results_path:
+            old_value_pairs_set, best_schedule, best_loss = self.load_previous_results(previous_results_path)
+            print("Continuing optimization from previous results")
+        else:
+            old_value_pairs_set = set()
+            best_schedule = None
+            best_loss = float('inf')
+            print("Starting new optimization")
         
         # Extract base name for simulation files
         base_name = os.path.splitext(os.path.basename(base_idf_path))[0]
 
-        # Generate initial schedules (24 values between 0 and 1)
-        for start_point in range(num_starting_points):
-            # Create a unique simulation file for this starting point
-            unique_idf_name = f"{base_name}_start_point_{start_point}.idf"
-            unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
-            self._copy_idf_file(base_idf_path, unique_idf_path)
+        # Generate new starting points if needed
+        required_points = num_starting_points - len(old_value_pairs_set) if previous_results_path else num_starting_points
+        if required_points > 0:
+            print(f"Generating {required_points} new starting points")
             
-            # noise = np.random.uniform(-noise_factor, noise_factor, base_schedule.shape) * base_schedule
-            # schedule = np.clip(base_schedule + noise, 0, 1)
-
-            schedule = np.random.uniform(0, 1, 24)
-            schedule = np.round(schedule, 2)
+            # Use high temperature for initial exploration
+            if self.use_dynamic_temp:
+                self._update_model(0.7)
             
-            energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
-            loss = self.evaluate_loss(energy_consumption, ground_truth)
-            old_value_pairs_set.add(tuple([round(x, 2) for x in list(schedule)] + energy_consumption + [loss]))
-            
-            # Log initial schedule for each starting point
-            self._log_iteration(f"start_point_{start_point}", schedule, energy_consumption, loss)
-        
-        best_loss = float('inf')
-        best_schedule = None
+            for start_point in range(required_points):
+                unique_idf_name = f"{base_name}_start_point_{start_point}.idf"
+                unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
+                self._copy_idf_file(base_idf_path, unique_idf_path)
+                
+                schedule = np.random.uniform(0, 1, 24)
+                schedule = np.round(schedule, 2)
+                
+                energy_consumption = self.run_building_simulation(unique_idf_path, schedule)
+                loss = self.evaluate_loss(energy_consumption, ground_truth)
+                old_value_pairs_set.add(tuple([round(x, 2) for x in list(schedule)] + energy_consumption + [loss]))
+                
+                self._log_iteration(f"start_point_{start_point}", schedule, energy_consumption, loss)
+                
+                if loss < best_loss:
+                    best_loss = loss
+                    best_schedule = schedule
         
         # Optimization loop
         for iteration in range(num_iterations):
             print(f"\nIteration {iteration + 1}/{num_iterations}")
             
-            # Generate meta prompt
-            meta_prompt = self._generate_meta_prompt(old_value_pairs_set, ground_truth)
+            # Update temperature if using dynamic adjustment
+            if self.use_dynamic_temp:
+                temp = self.get_dynamic_temperature(iteration, num_iterations)
+                self._update_model(temp)
+                print(f"Current temperature: {temp:.2f}")
             
-            # Get new proposals from LLM
+            meta_prompt = self._generate_meta_prompt(old_value_pairs_set, ground_truth)
             new_schedules = self._get_llm_proposals(meta_prompt)
             
-            # Evaluate new proposals
             for idx, schedule in enumerate(new_schedules):
-                # Create a unique simulation file for this proposal
                 unique_idf_name = f"{base_name}_proposal_{idx}.idf"
                 unique_idf_path = os.path.join(self.save_folder, unique_idf_name)
                 self._copy_idf_file(base_idf_path, unique_idf_path)
@@ -140,7 +217,6 @@ class BuildingEnergyModelCalibrator:
                 loss = self.evaluate_loss(energy_consumption, ground_truth)
                 old_value_pairs_set.add(tuple([round(x, 2) for x in list(schedule)] + energy_consumption + [loss]))
                 
-                # Log each proposal
                 self._log_iteration(f"iteration_{iteration+1}", schedule, energy_consumption, loss)
                 
                 if loss < best_loss:
@@ -148,26 +224,23 @@ class BuildingEnergyModelCalibrator:
                     best_schedule = schedule
                     print(f"New best loss: {best_loss}")
                 
-                # Stopping criterion
                 if best_loss < 5:
                     print(f"Stopping early: best loss {best_loss} is below threshold")
-                
-                    # Save final results
                     self._save_results(self.save_folder, {
                         'iteration': iteration,
                         'best_loss': best_loss,
                         'best_schedule': best_schedule.tolist() if best_schedule is not None else None,
-                        'current_pairs': list(old_value_pairs_set)
+                        'current_pairs': list(old_value_pairs_set),
+                        'final_temperature': self.optimizer_llm_dict['temperature']
                     })
-
                     return best_schedule, best_loss
             
-            # Save intermediate results
             self._save_results(self.save_folder, {
                 'iteration': iteration,
                 'best_loss': best_loss,
                 'best_schedule': best_schedule.tolist() if best_schedule is not None else None,
-                'current_pairs': list(old_value_pairs_set)
+                'current_pairs': list(old_value_pairs_set),
+                'current_temperature': self.optimizer_llm_dict['temperature']
             })
         
         return best_schedule, best_loss
